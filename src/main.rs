@@ -11,9 +11,15 @@ fn main() {
                 let buf_reader = BufReader::new(&mut stream);
 
                 let request_line = buf_reader.lines().next().unwrap().unwrap();
-                let response = match request_line.as_str() {
-                    "GET / HTTP/1.1" => "HTTP/1.1 200 OK\r\n\r\n",
-                    _ => "HTTP/1.1 404 Not Found\r\n\r\n",
+                let mut parts = request_line.split_whitespace().skip(1);
+                let target = parts.next().unwrap();
+                let response : String = if target == "/" {
+                    "HTTP/1.1 200 OK\r\n\r\n".into()
+                } else if target.starts_with("/echo/") {
+                    let str = &target[6..];
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", str.len(), str)
+                } else {
+                    "HTTP/1.1 404 Not Found\r\n\r\n".into()
                 };
 
                 stream.write_all(response.as_bytes()).unwrap()
