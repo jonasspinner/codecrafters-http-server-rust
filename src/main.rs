@@ -1,12 +1,10 @@
 use clap::Parser;
 use std::collections::HashMap;
-use std::fmt::format;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::str::FromStr;
-use nom::{AsBytes, InputLength};
 use threadpool::ThreadPool;
 
 #[derive(Eq, PartialEq, Debug)]
@@ -161,7 +159,7 @@ impl Response {
         }
         writer.write_all(b"\r\n")?;
         if let Some(len) = self.headers.get("Content-Length") {
-            let len : usize = len.parse().unwrap();
+            let len: usize = len.parse().unwrap();
             assert_eq!(len, self.body.len());
         } else {
             assert!(self.body.is_empty());
@@ -224,11 +222,9 @@ fn handle_connection(mut stream: TcpStream, directory: Option<PathBuf>) {
     };
 
 
-    match request.headers.get("Accept-Encoding").map(|s| s.as_str()) {
-        Some("gzip") => {
-            response.headers.insert("Content-Encoding".into(), "gzip".into());
-        }
-        _ => {}
+    let encodings: Vec<_> = request.headers.get("Accept-Encoding").map(|value| value.split(", ").collect()).unwrap_or_default();
+    if encodings.contains(&"gzip") {
+        response.headers.insert("Content-Encoding".into(), "gzip".into());
     }
 
     let mut buf_writer = BufWriter::new(&mut stream);
