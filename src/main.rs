@@ -1,9 +1,12 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use clap::Parser;
 use threadpool::ThreadPool;
 
-fn handle_connection(mut stream: TcpStream) {
+fn handle_connection(mut stream: TcpStream, directory: PathBuf) {
     println!("accepted new connection");
     let buf_reader = BufReader::new(&mut stream);
     let mut lines = buf_reader.lines();
@@ -21,30 +24,53 @@ fn handle_connection(mut stream: TcpStream) {
     }
     //let body = lines.next().unwrap().unwrap();
 
-    let response : String = if target == "/" {
-        "HTTP/1.1 200 OK\r\n\r\n".into()
+    if target == "/" {
+        stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap()
     } else if target == "/user-agent" {
         let str = headers.get("user-agent").cloned().unwrap_or_default();
-        format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", str.len(), str)
+        stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", str.len(), str).as_bytes()).unwrap()
     } else if target.starts_with("/echo/") {
         let str = target.trim_start_matches("/echo/");
-        format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", str.len(), str)
+        stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", str.len(), str).as_bytes()).unwrap()
+    } else if target.starts_with("/files/") {
+        let file_name = target.trim_start_matches("/files/");
+        let mut path = directory;
+        path.push(file_name);
+        if let Ok(mut file) =  File::open(path) {
+            let len = file.metadata().unwrap().len();
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {len}\r\n\r\n").as_bytes()).unwrap();
+            let mut buf = [0; 4096];
+            loop {
+                let n = file.read(&mut buf).unwrap();
+                if n == 0 { break; }
+                stream.write_all(&buf[..n]).unwrap();
+            }
+        } else {
+            stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap();
+        }
     } else {
-        "HTTP/1.1 404 Not Found\r\n\r\n".into()
+        stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap()
     };
+}
 
-    stream.write_all(response.as_bytes()).unwrap()
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(long)]
+    directory: PathBuf,
 }
 
 fn main() {
+    let args = Args::parse();
+
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
     let pool = ThreadPool::new(4);
 
     for stream in listener.incoming() {
         let stream = stream.unwrap();
-        pool.execute(|| {
-            handle_connection(stream);
+        let directory = args.directory.clone();
+        pool.execute(move || {
+            handle_connection(stream, directory);
         });
     }
 }
