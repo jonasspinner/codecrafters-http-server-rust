@@ -1,12 +1,12 @@
+use clap::Parser;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use clap::Parser;
 use threadpool::ThreadPool;
 
-fn handle_connection(mut stream: TcpStream, directory: PathBuf) {
+fn handle_connection(mut stream: TcpStream, directory: Option<PathBuf>) {
     println!("accepted new connection");
     let buf_reader = BufReader::new(&mut stream);
     let mut lines = buf_reader.lines();
@@ -34,15 +34,19 @@ fn handle_connection(mut stream: TcpStream, directory: PathBuf) {
         stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", str.len(), str).as_bytes()).unwrap()
     } else if target.starts_with("/files/") {
         let file_name = target.trim_start_matches("/files/");
-        let mut path = directory;
-        path.push(file_name);
-        if let Ok(mut file) =  File::open(path) {
+
+        if let Some(Ok(mut file)) = directory.map(|mut path| {
+            path.push(file_name);
+            File::open(path)
+        }) {
             let len = file.metadata().unwrap().len();
             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {len}\r\n\r\n").as_bytes()).unwrap();
             let mut buf = [0; 4096];
             loop {
                 let n = file.read(&mut buf).unwrap();
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 stream.write_all(&buf[..n]).unwrap();
             }
         } else {
@@ -56,7 +60,7 @@ fn handle_connection(mut stream: TcpStream, directory: PathBuf) {
 #[derive(Parser, Debug)]
 struct Args {
     #[arg(long)]
-    directory: PathBuf,
+    directory: Option<PathBuf>,
 }
 
 fn main() {
