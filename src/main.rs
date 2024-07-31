@@ -5,6 +5,8 @@ use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::str::FromStr;
+use flate2::read::GzEncoder;
+use flate2::Compression;
 use threadpool::ThreadPool;
 
 #[derive(Eq, PartialEq, Debug)]
@@ -225,6 +227,10 @@ fn handle_connection(mut stream: TcpStream, directory: Option<PathBuf>) {
     let encodings: Vec<_> = request.headers.get("Accept-Encoding").map(|value| value.split(", ").collect()).unwrap_or_default();
     if encodings.contains(&"gzip") {
         response.headers.insert("Content-Encoding".into(), "gzip".into());
+        let uncompressed_body = std::mem::take(&mut response.body);
+        let mut encoder = GzEncoder::new(&uncompressed_body[..], Compression::default());
+        encoder.read_to_end(&mut response.body).unwrap();
+        response.headers.insert("Content-Length".into(), format!("{}", response.body.len()));
     }
 
     let mut buf_writer = BufWriter::new(&mut stream);
