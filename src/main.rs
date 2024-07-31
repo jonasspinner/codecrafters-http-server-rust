@@ -1,10 +1,12 @@
 use clap::Parser;
 use std::collections::HashMap;
+use std::fmt::format;
 use std::fs::File;
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::str::FromStr;
+use nom::{AsBytes, InputLength};
 use threadpool::ThreadPool;
 
 #[derive(Eq, PartialEq, Debug)]
@@ -105,38 +107,105 @@ fn read_from_stream(stream: &mut TcpStream) -> std::io::Result<Request> {
     Ok(Request { method, target, version, headers, body })
 }
 
+enum StatusCode {
+    Ok,
+    Created,
+    BadRequest,
+    NotFound,
+}
+
+impl StatusCode {
+    fn code(&self) -> usize {
+        match self {
+            StatusCode::Ok => 200,
+            StatusCode::Created => 201,
+            StatusCode::BadRequest => 400,
+            StatusCode::NotFound => 404,
+        }
+    }
+
+    fn canonical_reason(&self) -> &'static str {
+        match self {
+            StatusCode::Ok => "OK",
+            StatusCode::Created => "Created",
+            StatusCode::BadRequest => "Bad Request",
+            StatusCode::NotFound => "Not Found",
+        }
+    }
+}
+
+struct Response {
+    version: String,
+    status: StatusCode,
+    headers: HashMap<String, String>,
+    body: Vec<u8>,
+}
+
+impl Response {
+    fn with_code(status_code: StatusCode) -> Self {
+        Self {
+            version: "HTTP/1.1".to_string(),
+            status: status_code,
+            headers: Default::default(),
+            body: vec![],
+        }
+    }
+    fn write(&self, writer: &mut impl Write) -> std::io::Result<()> {
+        writer.write_all(format!("{} {} {}\r\n", self.version, self.status.code(), self.status.canonical_reason()).as_bytes())?;
+        for (key, value) in &self.headers {
+            let mut line = key.clone();
+            line.push_str(": ");
+            line.push_str(value);
+            line.push_str("\r\n");
+            writer.write_all(line.as_bytes())?;
+        }
+        writer.write_all(b"\r\n")?;
+        if let Some(len) = self.headers.get("Content-Length") {
+            let len : usize = len.parse().unwrap();
+            assert_eq!(len, self.body.len());
+        } else {
+            assert!(self.body.is_empty());
+        }
+        writer.write_all(&self.body)?;
+        Ok(())
+    }
+}
+
 fn handle_connection(mut stream: TcpStream, directory: Option<PathBuf>) {
     let request = read_from_stream(&mut stream).unwrap();
     println!("{:?}", request);
 
-    match (request.method, request.target.as_str()) {
-        (Method::Get, "/") => { stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap() }
+    let mut response = match (request.method, request.target.as_str()) {
+        (Method::Get, "/") => Response::with_code(StatusCode::Ok),
         (Method::Get, "/user-agent") => {
-            let str = request.headers.get("User-Agent").unwrap();
-            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", str.len(), str).as_bytes()).unwrap()
+            let user_agent = request.headers.get("User-Agent").unwrap();
+            let mut response = Response::with_code(StatusCode::Ok);
+            response.headers.insert("Content-Type".into(), "text/plain".into());
+            response.headers.insert("Content-Length".into(), format!("{}", user_agent.len()));
+            response.body = user_agent.as_bytes().to_vec();
+            response
         }
         (Method::Get, target) if target.starts_with("/echo/") => {
-            let str = target.trim_start_matches("/echo/");
-            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", str.len(), str).as_bytes()).unwrap()
+            let message = target.trim_start_matches("/echo/");
+            let mut response = Response::with_code(StatusCode::Ok);
+            response.headers.insert("Content-Type".into(), "text/plain".into());
+            response.headers.insert("Content-Length".into(), format!("{}", message.len()));
+            response.body = message.as_bytes().to_vec();
+            response
         }
         (Method::Get, target) if target.starts_with("/files/") => {
             let file_name = target.trim_start_matches("/files/");
-            if let Some(Ok(mut file)) = directory.map(|mut path| {
+            if let Some(Ok(content)) = directory.map(|mut path| {
                 path.push(file_name);
-                File::open(path)
+                std::fs::read(path)
             }) {
-                let len = file.metadata().unwrap().len();
-                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {len}\r\n\r\n").as_bytes()).unwrap();
-                let mut buf = [0; 4096];
-                loop {
-                    let n = file.read(&mut buf).unwrap();
-                    if n == 0 {
-                        break;
-                    }
-                    stream.write_all(&buf[..n]).unwrap();
-                }
+                let mut response = Response::with_code(StatusCode::Ok);
+                response.headers.insert("Content-Type".into(), "application/octet-stream".into());
+                response.headers.insert("Content-Length".into(), format!("{}", content.len()));
+                response.body = content;
+                response
             } else {
-                stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap();
+                Response::with_code(StatusCode::NotFound)
             }
         }
         (Method::Post, target) if target.starts_with("/files/") => {
@@ -146,15 +215,24 @@ fn handle_connection(mut stream: TcpStream, directory: Option<PathBuf>) {
                 File::create_new(path)
             }) {
                 file.write_all(&request.body).unwrap();
-                stream.write_all(b"HTTP/1.1 201 Created\r\n\r\n").unwrap()
+                Response::with_code(StatusCode::Created)
             } else {
-                stream.write_all(b"HTTP/1.1 500 \r\n\r\n").unwrap()
+                Response::with_code(StatusCode::BadRequest)
             }
         }
-        _ => {
-            stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap()
+        _ => Response::with_code(StatusCode::NotFound),
+    };
+
+
+    match request.headers.get("Accept-Encoding").map(|s| s.as_str()) {
+        Some("gzip") => {
+            response.headers.insert("Content-Encoding".into(), "gzip".into());
         }
+        _ => {}
     }
+
+    let mut buf_writer = BufWriter::new(&mut stream);
+    response.write(&mut buf_writer).unwrap();
 }
 
 #[derive(Parser, Debug)]
